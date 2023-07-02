@@ -1,0 +1,190 @@
+hydra:
+  run:
+    dir: ./
+
+aws_output_bucket:
+
+train_file: /opt/ml/input/data/train/distant_path_v9.1_fix_no_shuffle.train.0.pkl
+test_file:
+dist_load_data_barrier: False
+
+# Model
+model:
+  _target_: transformers.AutoConfig.from_pretrained
+  pad_token_id: 0
+
+
+get_layers:
+    _target_: models.llama_ds_mp_wrap.get_layers_from_config
+    activation_checkpointing: True
+
+enable_flash_attention: False
+
+# Pipeline parallelism specific
+num_stages: 8
+#activation_checkpoint_interval: 1
+
+# Data loading
+read_tensor_train:
+  _target_: data.wiki_entity_path_v9_1_2.convert_examples_into_features_seq2seq
+  max_neg_num: 3
+  aug_num: 3
+  max_seq_length: 512
+  shuffle_context: True
+  min_rep_num: 5
+  geo_p: 0.4
+  deduct_ratio: 1.0
+  context_ratio: 1.0
+  noise_sent_ratio: 0.0
+  num_workers: 128
+
+
+extended_vocab:
+
+# Data collator
+collator:
+  _target_: data.collators.wiki_seq2seq_collator.WikiSeq2SeqCollatorWithCausalLMCombine
+  max_seq_length: 512
+  tokenizer: ${model_name_or_path}
+  causal_lm: True
+  causal_lm_add_eos: False
+  generative_mode: True
+  return_standard_inputs: True
+  use_fast: False
+
+# Dataloader
+num_workers: 4
+prefetch_factor: 2
+
+do_preprocess: False
+
+model_name_or_path: /tmp/llama-65b-mp8
+pretrain:
+
+exp_name: llama.65b.merit_v91_v91.seq2seq.v5.0.3aug.mp8.dp2.adamw.500steps.NA100.0702.aws
+exp_notes:
+output_dir: /tmp/${exp_name}  # Fix <pad token id>
+
+do_train: True
+evaluate_during_training: False
+
+do_eval: True
+eval_sub_path: checkpoint-*
+
+# Training hyper-parameters
+per_gpu_train_batch_size: 8
+per_gpu_eval_batch_size: 1
+learning_rate: 1e-6
+gradient_accumulation_steps: 256
+weight_decay: 0.001
+adam_epsilon: 1e-6
+adam_betas: "(0.9, 0.99)"
+max_grad_norm: 5.0
+num_train_epochs: 1
+max_steps: -1
+warmup_proportion: 0
+warmup_steps: 50
+total_dataset_len: 2122936
+
+# Optimizer
+optimizer:
+use_nvlamb:
+bit_training:
+
+
+logging_steps: 1
+save_best: False
+save_steps: 50
+eval_steps: -1
+ddp_eval: True
+no_cuda: False
+seed: 42
+local_rank: -1
+fp16: True
+fp16_opt_level: O1
+fp16_bfloat16: True
+
+# Prediction config
+prediction_cfg:
+  metric: "acc"
+  measure: 1
+  best_checkpoint:
+  best_result:
+eval_forward_fn:
+  _target_: general_util.evaluator.DiscriminatorForwardFn
+post_process:
+
+
+# Deepspeed config
+ds_cfg:
+  train_micro_batch_size_per_gpu: ${per_gpu_train_batch_size}
+  gradient_accumulation_steps: ${gradient_accumulation_steps}
+  optimizer:
+    type: AdamW
+    params:
+      lr: ${learning_rate}
+      betas: [0.9, 0.99]
+      eps: ${adam_epsilon}
+      weight_decay: ${weight_decay}
+  scheduler:
+    type: WarmupDecayLR
+    params:
+      total_num_steps:
+      warmup_max_lr: ${learning_rate}
+      warmup_num_steps:
+      warmup_type: linear
+  gradient_clipping: ${max_grad_norm}
+  fp16:
+    enabled: true
+    loss_scale: 0
+    loss_scale_window: 1000
+    initial_scale_power: 12
+    hysteresis: 2
+    min_loss_scale: 1
+#  bf16:
+#    enabled: ${fp16}
+#  autotuning:
+#    enabled: true
+#    arg_mappings:
+#      train_micro_batch_size_per_gpu: "per_gpu_train_batch_size"
+#      gradient_accumulation_steps: "gradient_accumulation_steps"
+#      zero_optimization: "ds_cfg.zero_optimization"
+  zero_optimization:
+    stage: 1
+    contiguous_gradients: True
+    overlap_comm: True
+    reduce_scatter: True
+    reduce_bucket_size: 5e7
+    allgather_partitions: True
+    allgather_bucket_size: 5e7
+    offload_optimizer:
+      device: cpu
+      pin_memory: True
+#    offload_param:
+#      device: cpu
+#      pin_memory: True
+#  activation_checkpointing:
+#    partition_activations: True
+#    cpu_checkpointing: True
+#    contiguous_memory_optimization: False
+#    number_checkpoints: False
+#    synchronize_checkpoint_boundary: False
+#    profile: False
+  steps_per_print: 1
+
+# Lightseq config
+with_lightseq: False
+
+
+summary_helper:
+  _target_: general_util.tensorboard_helper.WandbWriter
+  batch_index_or_keys:
+  outputs_index_or_keys:
+
+# Temporary variables
+n_gpu:
+device:
+train_batch_size:
+eval_batch_size:
+world_size:
+topology:
