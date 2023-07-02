@@ -9,6 +9,7 @@ But you can still quickly adapt it to your own usage by removing the relevant pa
 ## Updates
 
 2023/07/02: Successfully enabling hybrid training of LLaMA-65B on two nodes with 16 * 80G A100.
+
 2023/06/25: Repo established. Add some notes first and the code will soon be released when the clear is ready.
 
 ## Core Code Snippets
