@@ -21,26 +21,26 @@ import datetime
 import glob
 import logging
 import os
+import random
 import sys
 from typing import Dict, Union
 
 import deepspeed
 import hydra
+import numpy as np
 import torch
 import wandb
 from deepspeed.pipe import PipelineModule
 from deepspeed.runtime.engine import DeepSpeedEngine
 from omegaconf import DictConfig, OmegaConf
 from torch import distributed as dist
-from torch.utils.data import (DataLoader, RandomSampler, DistributedSampler)
+from torch.utils.data import (DataLoader, RandomSampler, DistributedSampler, ConcatDataset)
 from tqdm import tqdm, trange
 from transformers import (AutoTokenizer, PreTrainedTokenizer)
 
 import models.llama_ds_mp_wrap
-from general_util.logger import setting_logger
-from general_util.training_utils import set_seed, load_and_cache_examples
 
-logger: logging.Logger
+logger = logging.getLogger(__name__)
 
 torch.backends.cuda.matmul.allow_tf32 = True
 
@@ -121,9 +121,66 @@ def load_checkpoint(self,
 DeepSpeedEngine.load_checkpoint = load_checkpoint
 
 
+def set_seed(args):
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if args.n_gpu > 0:
+        torch.cuda.manual_seed_all(args.seed)
+
+
+def initialize_dataset(cfg: DictConfig, file_path: str, tokenizer: PreTrainedTokenizer):
+    if "_target_" in cfg:
+        return hydra.utils.call(cfg, file_path=file_path, tokenizer=tokenizer)
+    else:
+        datasets = [initialize_dataset(cfg[key], file_path, tokenizer) for key in cfg.keys()]
+        assert len(datasets)
+        datasets = ConcatDataset(datasets)
+        return datasets
+
+
+def load_and_cache_examples(cfg, tokenizer: PreTrainedTokenizer, _split="train", _file: str = None):
+    if_barrier = False
+
+    if _file is not None:
+        input_file = _file
+        if_barrier = True
+    else:
+        if _split == "train":
+            input_file = cfg.train_file
+            if_barrier = True
+        elif _split == "dev":
+            input_file = cfg.dev_file
+            if cfg.ddp_eval and cfg.local_rank != -1:
+                if_barrier = True
+        elif _split == "test":
+            input_file = cfg.test_file
+            if cfg.ddp_eval and cfg.local_rank != -1:
+                if_barrier = True
+        else:
+            raise RuntimeError(_split)
+
+    if getattr(cfg, "dist_load_data_barrier", True) and if_barrier and cfg.local_rank not in [-1, 0]:
+        dist.barrier()  # Make sure only the first process in distributed training process the dataset, and the others will use the cache
+
+    sub_config = f"read_tensor_{_split}"
+    if sub_config in cfg:
+        dataset = initialize_dataset(cfg[sub_config], file_path=input_file, tokenizer=tokenizer)
+    else:
+        dataset = initialize_dataset(cfg.read_tensor, file_path=input_file, tokenizer=tokenizer)
+
+    if getattr(cfg, "dist_load_data_barrier", True) and if_barrier and cfg.local_rank == 0:
+        dist.barrier()  # Make sure only the first process in distributed training process the dataset, and the others will use the cache
+
+    if dist.is_initialized():
+        dist.barrier()
+
+    return dataset
+
+
 def load_empty_dataset_and_collator(cfg: DictConfig):
     from data.test import TestDataset
-    from data.collators.flan import FlanCollatorOverCollator
+    from data.flan import FlanCollatorOverCollator
 
     dataset = TestDataset(None, None, getattr(cfg, "total_dataset_len", -1))
     collator = FlanCollatorOverCollator(collator=None,
@@ -218,15 +275,14 @@ def train(cfg, model, tokenizer, continue_from_global_step=0):
     ds_config.scheduler.params.warmup_num_steps = num_warmup_steps
     ds_config = OmegaConf.to_container(ds_config, resolve=True)
 
+    if torch.__version__ >= "2" and (getattr(os.environ, "TORCH_COMPILE", False) or getattr(cfg, "compile", False)):
+        model = torch.compile(model, mode="max-autotune")
     model, optimizer, _, scheduler = deepspeed.initialize(model=model,
                                                           model_parameters=[p for p in model.parameters() if p.requires_grad],
                                                           config=ds_config)
 
     model.load_checkpoint(cfg.model_name_or_path, load_module_only=True, load_optimizer_states=False, load_lr_scheduler_states=False)
     logger.info(optimizer.optimizer)
-
-    if torch.__version__ >= "2" and (getattr(os.environ, "TORCH_COMPILE", False) or getattr(cfg, "compile", False)):
-        model = torch.compile(model, mode="max-autotune")
 
     # Train!
     logger.info("***** Running training *****")
@@ -345,8 +401,6 @@ def main(cfg: DictConfig):
         cfg.world_size = dist.get_world_size()
     cfg.device = device
 
-    global logger
-    logger = setting_logger(cfg.output_dir, local_rank=cfg.local_rank)
     logger.warning("Process rank: %s, device: %s, n_gpu: %s, distributed training: %s, 16-bits training: %s",
                    cfg.local_rank, cfg.device, cfg.n_gpu, bool(cfg.local_rank != -1), cfg.fp16)
     logger.warning(f"CPU cores: {os.cpu_count()}")
@@ -364,11 +418,6 @@ def main(cfg: DictConfig):
     from general_util.tokenization_utils import expand_special_tokenizer
 
     expand_special_tokenizer(tokenizer)
-
-    if getattr(cfg, "enable_flash_attention", False):
-        logger.info("⚡⚡⚡ enable flash attention.")
-        from models.patching import replace_llama_attn_with_flash_attn
-        replace_llama_attn_with_flash_attn()
 
     model_or_config = hydra.utils.call(cfg.model, cfg.model_name_or_path)
 

@@ -1,0 +1,11 @@
+wandb
+nltk
+tensorboard
+sentencepiece
+transformers
+peft
+torch==2.0.0
+hydra-core
+fairscale
+deepspeed
+datasets
