@@ -14,7 +14,7 @@ But you can still quickly adapt it to your own usage by removing the relevant pa
 
 ## Core Code Snippets
 
-**Model initialization**
+### Model initialization
 
 There are two main approaches to enable model initialization and loading pre-trained weights. One is first initializing the model using the `from_pretrained` function of HuggingFace's `transformers` repo.
 In this case, you may refer to `models.llama_ds_mp_wrap.get_model` for details.
@@ -36,16 +36,16 @@ model.load_checkpoint(cfg.model_name_or_path, load_module_only=True, load_optimi
 Note that the pre-trained weights should be converted from HF format by using `convert2ckpt.py`.
 
 
-**Hybrid Training of Pipeline Parallelism (PP) and Distributed Data Parallel (DP)**
+### Hybrid Training of Pipeline Parallelism (PP) and Distributed Data Parallel (DP)
 
 When `dist.world_size` > `num_stages`, hybrid training is automatically enabled. The number of stages of pipeline parallel (PP) is `num_stages`
 while the degree of data-parallel (DP) is `dist.world_size // num_stages`.
 
-**No Weight Typing of Word Embedding**
+### No Weight Typing of Word Embedding
 
 Different from traditional pre-trained language models, LLaMA do not need weight typing. So do not use `TiedLayerSpec` to wrap `embed_tokens` and `lm_head` modules.
 
-**Distributed Sampler Setting**
+### Distributed Sampler Setting
 
 When hybrid training of PP and DP is enabled, `DistributedSampler` should be carefully set for each rank w.r.t. its state (PP stage and DP group).
 
@@ -61,7 +61,7 @@ else:
     sub_train_sampler = RandomSampler(sub_train_dataset)
 ```
 
-**Data Fetch Design of DeepSpeed and CPU Memory Reduction**
+### Data Fetch Design of DeepSpeed and CPU Memory Reduction
 
 In DeepSpeed design, among specific PP group, only the first and the last rank, i.e., `stage=0 or stage=num_stages - 1`, 
 will fetch minibatch from dataloader, and the other ranks never fetch data.
@@ -127,6 +127,24 @@ else:
 ```
 
 where `TestDataset` is an empty dataset and the collator is arbitrary one meeting the input format.
+
+## Know Problems and Possible Solutions
+
+### BF16 Support
+Bfloat16 can be used by setting the following in deepspeed config:
+```
+data_types:
+  grad_accum_dtype: "fp32"
+```
+However, bfloat16 cannot be used with optimizer offload. Note that pipeline parallelism is designed not to support optimizer offload (see issue [\#3866](https://github.com/microsoft/DeepSpeed/issues/3866)). Nevertheless, it can still be enabled under fp16 training.
+
+### Flash Attention
+
+I cannot enable flash attention using both the original implementation or `torch.nn.functional.scaled_dot_product_attention` from pytorch 2.0. See issue [here](https://github.com/HuangLK/llama-deepspeed/issues/36) and [here](https://github.com/microsoft/DeepSpeed/issues/3868).
+
+### Torch Compile
+
+Torch compilation is not supported in the template, which perhaps becuase my writing is incorrect.
 
 ## Reference & Acknowledgement
 
